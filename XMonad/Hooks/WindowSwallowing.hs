@@ -50,7 +50,7 @@ import           XMonad.Util.WindowProperties
 import           XMonad.Util.Run                ( runProcessWithInput )
 import           Data.Semigroup                 ( All(..) )
 import qualified Data.Map.Strict               as M
-import           Data.List                      ( isInfixOf )
+import           Data.List                      ( isInfixOf, findIndex )
 import           Control.Monad                  ( when )
 
 -- $usage
@@ -142,13 +142,13 @@ swallowEventHook parentQueries childQueries event = do
               curStack <- withWindowSet (return . currentStack)
               let oldLen = length (W.integrate oldStack)
               let curLen = length (W.integrate' curStack)
-              return (oldLen - 1 == curLen && childWindow == W.focus oldStack)
+              return $ oldLen - 1 == curLen && childWindow `elem` W.integrate oldStack
 
             if stackStoredCorrectly
               then windows
                 (\ws ->
                   updateCurrentStack
-                      (const $ Just $ oldStack { W.focus = parent })
+                      (const $ Just $ (setStackFocus childWindow oldStack) { W.focus = parent })
                     $ moveFloatingState childWindow parent
                     $ ws { W.floating = oldFloating }
                 )
@@ -160,6 +160,19 @@ swallowEventHook parentQueries childQueries event = do
         return ()
     _ -> return ()
   return $ All True
+
+
+-- | change a stack's currently focused window to the given one, if it is present in the stack.
+setStackFocus :: Eq a => a -> W.Stack a -> W.Stack a
+setStackFocus win stack = case maybeWinIndex of
+                               Just winIndex -> W.Stack { W.focus = win
+                                                        , W.up    = reverse $ take winIndex wins
+                                                        , W.down  = drop (succ winIndex) wins }
+                               -- if the stack contains the window `win` (which the places where we
+                               -- use `setStackFocus` do adhere to), then we never get `Nothing` here.
+                               Nothing -> stack
+  where wins = W.integrate stack
+        maybeWinIndex = findIndex (win ==) wins
 
 
 -- | insert a window as focused into the current stack, moving the previously focused window down the stack
