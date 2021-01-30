@@ -161,10 +161,6 @@ swallowEventHook parentQueries childQueries event = do
                    else windows (insertIntoStack parent)
                  -- after restoring, we remove the information about the swallowing from the state.
                  XS.modify $ removeSwallowed childWindow
-                 -- We don't need to remove the old stack since it staying there cannot cause problems
-                 -- (other than a memory leak?); on the other hand, if we were to remove it but still require
-                 -- the Stack for this workspace, then we'll probably end up with an empty Stack, which is
-                 -- likely wrong.
                  currentlySwallowed' <- XS.gets currentlySwallowed
                  when (M.foldr (\(w,_) acc -> acc && w /= wid) True currentlySwallowed')
                      $ XS.modify $ removeStackBeforeWindowClosing wid
