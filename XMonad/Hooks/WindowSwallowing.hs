@@ -85,8 +85,9 @@ swallowEventHook parentQueries childQueries event = do
       -- For a window to be opened from within another window, that other window
       -- must be focused. Thus the parent window that would be swallowed has to be
       -- the currently focused window.
-      -- FIXME: This assumes that the parent window is the current one, which may not be true.
-      withFocused $ \parentWindow -> do -- XXX focus
+      -- FIXME: This assumes that the parent window is the current one, which
+      -- may not be true (if we switch out of that window fast enough).
+      withFocused $ \parentWindow -> do
         -- First verify that both windows match the given queries
         parentMatches <- runQuery parentQueries parentWindow
         childMatches  <- runQuery childQueries childWindow
