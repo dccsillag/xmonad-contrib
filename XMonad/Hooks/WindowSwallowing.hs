@@ -165,6 +165,9 @@ swallowEventHook parentQueries childQueries event = do
                  -- (other than a memory leak?); on the other hand, if we were to remove it but still require
                  -- the Stack for this workspace, then we'll probably end up with an empty Stack, which is
                  -- likely wrong.
+                 currentlySwallowed' <- XS.gets currentlySwallowed
+                 when (M.foldr (\(w,_) acc -> acc && w /= wid) True currentlySwallowed')
+                     $ XS.modify $ removeStackBeforeWindowClosing wid
 
                  windows $ W.view cwid
               _ -> return ()
@@ -253,6 +256,11 @@ setStackBeforeWindowClosing
   :: WorkspaceId -> Maybe (W.Stack Window) -> SwallowingState -> SwallowingState
 setStackBeforeWindowClosing wid stack s@SwallowingState { stackBeforeWindowClosing } =
   s { stackBeforeWindowClosing = M.insert wid stack stackBeforeWindowClosing }
+
+removeStackBeforeWindowClosing
+  :: WorkspaceId -> SwallowingState -> SwallowingState
+removeStackBeforeWindowClosing wid s@SwallowingState { stackBeforeWindowClosing } =
+  s { stackBeforeWindowClosing = M.delete wid stackBeforeWindowClosing }
 
 setFloatingBeforeWindowClosing
   :: M.Map Window W.RationalRect -> SwallowingState -> SwallowingState
