@@ -76,6 +76,7 @@ swallowEventHook
   -> Event      -- ^ The event to handle.
   -> X All
 swallowEventHook parentQueries childQueries event = do
+  cwid <- withWindowSet $ return . W.currentTag
   case event of
     -- This is called right before a window gets opened. We intercept that
     -- call to possibly open the window ourselves, swapping out
@@ -84,7 +85,8 @@ swallowEventHook parentQueries childQueries event = do
       -- For a window to be opened from within another window, that other window
       -- must be focused. Thus the parent window that would be swallowed has to be
       -- the currently focused window.
-      withFocused $ \parentWindow -> do
+      -- FIXME: This assumes that the parent window is the current one, which may not be true.
+      withFocused $ \parentWindow -> do -- XXX focus
         -- First verify that both windows match the given queries
         parentMatches <- runQuery parentQueries parentWindow
         childMatches  <- runQuery childQueries childWindow
@@ -106,7 +108,7 @@ swallowEventHook parentQueries childQueries event = do
                   ( W.modify' (\x -> x { W.focus = childWindow })
                   . moveFloatingState parentWindow childWindow
                   )
-                XS.modify (addSwallowedParent parentWindow childWindow)
+                XS.modify (addSwallowedParent cwid parentWindow childWindow)
             _ -> return ()
           return ()
 
@@ -116,7 +118,7 @@ swallowEventHook parentQueries childQueries event = do
     -- state of the window stack here, such that we know where the
     -- child window was on the screen when restoring the swallowed parent process.
     ConfigureEvent{} -> withWindowSet $ \ws -> do
-      XS.modify . setStackBeforeWindowClosing . currentStack $ ws
+      XS.modify . setStackBeforeWindowClosing cwid . currentStack $ ws
       XS.modify . setFloatingBeforeWindowClosing . W.floating $ ws
 
     -- This is called right after any window closes.
@@ -127,35 +129,45 @@ swallowEventHook parentQueries childQueries event = do
         -- we get some data from the extensible state, most notably we ask for
         -- the \"parent\" window of the now closed window.
         maybeSwallowedParent <- XS.gets (getSwallowedParent childWindow)
-        maybeOldStack        <- XS.gets stackBeforeWindowClosing
+        maybeOldStackMap     <- XS.gets stackBeforeWindowClosing
         oldFloating          <- XS.gets floatingBeforeClosing
-        case (maybeSwallowedParent, maybeOldStack) of
-          (Just parent, Just oldStack) -> do
-            -- If there actually is a corresponding swallowed parent window for this window,
-            -- we will try to restore it.
-            -- because there are some cases where the stack-state is not stored correctly in the ConfigureEvent hook,
-            -- we have to first check if the stack-state is valid.
-            -- if it is, we can restore the parent exactly where the child window was before being closed
-            -- if the stored stack-state is invalid however, we still restore the window
-            -- by just inserting it as the focused window in the stack.
-            stackStoredCorrectly <- do
-              curStack <- withWindowSet (return . currentStack)
-              let oldLen = length (W.integrate oldStack)
-              let curLen = length (W.integrate' curStack)
-              return $ oldLen - 1 == curLen && childWindow `elem` W.integrate oldStack
+        case maybeSwallowedParent of
+          Just (wid, parent) ->
+            case M.lookup wid maybeOldStackMap of
+              Just (Just oldStack) -> do
+                 -- If there actually is a corresponding swallowed parent window for this window,
+                 -- we will try to restore it.
+                 -- because there are some cases where the stack-state is not stored correctly in the ConfigureEvent hook,
+                 -- we have to first check if the stack-state is valid.
+                 -- if it is, we can restore the parent exactly where the child window was before being closed
+                 -- if the stored stack-state is invalid however, we still restore the window
+                 -- by just inserting it as the focused window in the stack.
+                 windows $ W.view wid
 
-            if stackStoredCorrectly
-              then windows
-                (\ws ->
-                  updateCurrentStack
-                      (const $ Just $ (setStackFocus childWindow oldStack) { W.focus = parent })
-                    $ moveFloatingState childWindow parent
-                    $ ws { W.floating = oldFloating }
-                )
-              else windows (insertIntoStack parent)
-            -- after restoring, we remove the information about the swallowing from the state.
-            XS.modify $ removeSwallowed childWindow
-            XS.modify $ setStackBeforeWindowClosing Nothing
+                 stackStoredCorrectly <- do
+                   curStack <- withWindowSet $ return . currentStack
+                   let oldLen = length (W.integrate oldStack)
+                   let curLen = length (W.integrate' curStack)
+                   return $ oldLen - 1 == curLen && childWindow `elem` W.integrate oldStack
+
+                 if stackStoredCorrectly
+                   then windows
+                     (\ws ->
+                       updateCurrentStack
+                           (const $ Just $ (setStackFocus childWindow oldStack) { W.focus = parent })
+                         $ moveFloatingState childWindow parent
+                         $ ws { W.floating = oldFloating }
+                     )
+                   else windows (insertIntoStack parent)
+                 -- after restoring, we remove the information about the swallowing from the state.
+                 XS.modify $ removeSwallowed childWindow
+                 -- We don't need to remove the old stack since it staying there cannot cause problems
+                 -- (other than a memory leak?); on the other hand, if we were to remove it but still require
+                 -- the Stack for this workspace, then we'll probably end up with an empty Stack, which is
+                 -- likely wrong.
+
+                 windows $ W.view cwid
+              _ -> return ()
           _ -> return ()
         return ()
     _ -> return ()
@@ -220,26 +232,27 @@ isChildOf child parent = do
 
 data SwallowingState =
   SwallowingState
-    { currentlySwallowed       :: M.Map Window Window         -- ^ mapping from child window window to the currently swallowed parent window
-    , stackBeforeWindowClosing :: Maybe (W.Stack Window)      -- ^ current stack state right before DestroyWindowEvent is sent
-    , floatingBeforeClosing    :: M.Map Window W.RationalRect -- ^ floating map of the stackset right before DestroyWindowEvent is sent
+    { currentlySwallowed       :: M.Map Window (WorkspaceId, Window)         -- ^ mapping from child window window to the currently swallowed parent window
+    , stackBeforeWindowClosing :: M.Map WorkspaceId (Maybe (W.Stack Window)) -- ^ current stack state right before DestroyWindowEvent is sent
+    , floatingBeforeClosing    :: M.Map Window W.RationalRect                -- ^ floating map of the stackset right before DestroyWindowEvent is sent
     } deriving (Typeable, Show)
 
-getSwallowedParent :: Window -> SwallowingState -> Maybe Window
+getSwallowedParent :: Window -> SwallowingState -> Maybe (WorkspaceId, Window)
 getSwallowedParent win SwallowingState { currentlySwallowed } =
   M.lookup win currentlySwallowed
 
-addSwallowedParent :: Window -> Window -> SwallowingState -> SwallowingState
-addSwallowedParent parent child s@SwallowingState { currentlySwallowed } =
-  s { currentlySwallowed = M.insert child parent currentlySwallowed }
+addSwallowedParent :: WorkspaceId -> Window -> Window -> SwallowingState -> SwallowingState
+addSwallowedParent wid parent child s@SwallowingState { currentlySwallowed } =
+  s { currentlySwallowed = M.insert child (wid, parent) currentlySwallowed }
 
 removeSwallowed :: Window -> SwallowingState -> SwallowingState
 removeSwallowed child s@SwallowingState { currentlySwallowed } =
   s { currentlySwallowed = M.delete child currentlySwallowed }
 
 setStackBeforeWindowClosing
-  :: Maybe (W.Stack Window) -> SwallowingState -> SwallowingState
-setStackBeforeWindowClosing stack s = s { stackBeforeWindowClosing = stack }
+  :: WorkspaceId -> Maybe (W.Stack Window) -> SwallowingState -> SwallowingState
+setStackBeforeWindowClosing wid stack s@SwallowingState { stackBeforeWindowClosing } =
+  s { stackBeforeWindowClosing = M.insert wid stack stackBeforeWindowClosing }
 
 setFloatingBeforeWindowClosing
   :: M.Map Window W.RationalRect -> SwallowingState -> SwallowingState
@@ -247,7 +260,7 @@ setFloatingBeforeWindowClosing x s = s { floatingBeforeClosing = x }
 
 instance ExtensionClass SwallowingState where
   initialValue = SwallowingState { currentlySwallowed       = mempty
-                                 , stackBeforeWindowClosing = Nothing
+                                 , stackBeforeWindowClosing = mempty
                                  , floatingBeforeClosing    = mempty
                                  }
 
